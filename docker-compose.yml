@@ -1,0 +1,136 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Architecture: NameNode (HDFS) → DataNode → SparkMaster → SparkWorker → API
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Hadoop NameNode (HDFS Master) ──────────────────────────────────────────
+  namenode:
+    image: apache/hadoop:3.4.3
+    container_name: namenode
+    hostname: namenode
+    user: root
+    command: >
+      bash -c "
+        [ -d /hadoop/dfs/name/current ] || hdfs namenode -format -force -nonInteractive &&
+        hdfs namenode
+      "
+    ports:
+      - "9870:9870"   # HDFS Web UI
+      - "9000:9000"   # HDFS RPC
+    volumes:
+      - hadoop_namenode:/hadoop/dfs/name
+      - ./hadoop/config/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./hadoop/config/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+    environment:
+      - HADOOP_HOME=/opt/hadoop
+    healthcheck:
+      test: ["CMD-SHELL", "hdfs dfsadmin -safemode get 2>/dev/null | grep -q 'OFF' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 15
+      start_period: 60s
+
+  # ── Hadoop DataNode ─────────────────────────────────────────────────────────
+  datanode:
+    image: apache/hadoop:3.4.3
+    container_name: datanode
+    hostname: datanode
+    user: root
+    command: ["hdfs", "datanode"]
+    depends_on:
+      namenode:
+        condition: service_healthy
+    volumes:
+      - hadoop_datanode:/hadoop/dfs/data
+      - ./hadoop/config/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./hadoop/config/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+    environment:
+      - HADOOP_HOME=/opt/hadoop
+
+  # ── HDFS Initializer (creates dirs + uploads dataset) ──────────────────────
+  hdfs-init:
+    image: apache/hadoop:3.4.3
+    container_name: hdfs-init
+    user: root
+    depends_on:
+      namenode:
+        condition: service_healthy
+      datanode:
+        condition: service_started
+    volumes:
+      - ./data:/tmp/data:ro
+      - ./hadoop/init/init-hdfs.sh:/init-hdfs.sh:ro
+      - ./hadoop/config/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./hadoop/config/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+    entrypoint: ["/bin/bash", "/init-hdfs.sh"]
+    environment:
+      - HADOOP_HOME=/opt/hadoop
+    restart: "no"
+
+  # ── Spark Master ────────────────────────────────────────────────────────────
+  spark-master:
+    image: apache/spark:4.1.1-python3
+    container_name: spark-master
+    hostname: spark-master
+    depends_on:
+      namenode:
+        condition: service_healthy
+    ports:
+      - "8080:8080"   # Spark Web UI
+      - "7077:7077"   # Spark master RPC
+    volumes:
+      - ./hadoop/config:/opt/hadoop/conf:ro
+      - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    environment:
+      - HADOOP_CONF_DIR=/opt/hadoop/conf
+
+  # ── Spark Worker ────────────────────────────────────────────────────────────
+  spark-worker:
+    image: apache/spark:4.1.1-python3
+    container_name: spark-worker
+    hostname: spark-worker
+    depends_on:
+      - spark-master
+    ports:
+      - "8081:8081"   # Worker Web UI
+    volumes:
+      - ./hadoop/config:/opt/hadoop/conf:ro
+      - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    environment:
+      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_MEMORY=2g
+      - HADOOP_CONF_DIR=/opt/hadoop/conf
+
+  # ── FastAPI (Spark Driver + REST API) ───────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: api
+    hostname: api
+    depends_on:
+      spark-master:
+        condition: service_started
+      spark-worker:
+        condition: service_started
+      namenode:
+        condition: service_healthy
+      hdfs-init:
+        condition: service_completed_successfully
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./src:/app/src
+      - ./hadoop/config:/opt/hadoop/conf:ro
+    environment:
+      - HDFS_URL=hdfs://namenode:9000
+      - SPARK_MASTER=spark://spark-master:7077
+      - HADOOP_CONF_DIR=/opt/hadoop/conf
+      - PYTHONPATH=/app/src
+
+volumes:
+  hadoop_namenode:
+  hadoop_datanode:

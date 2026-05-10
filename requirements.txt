@@ -1,0 +1,4 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+pyspark==4.1.1
+pandas>=2.0.0
