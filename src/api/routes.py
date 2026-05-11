@@ -1,9 +1,4 @@
 """
-FastAPI route definitions for the Vehicle Telemetry API.
-
-All heavy lifting is delegated to spark/jobs.py batch functions.
-The SparkSession is retrieved from request.app.state.spark.
-
 Endpoints
 ─────────
 GET /health                     → liveness probe

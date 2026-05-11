@@ -263,10 +263,7 @@ def rpm_efficiency_ranking(spark: SparkSession) -> list:
 # ── 6. Detecção de anomalias (z-score > 3 em RPM ou MAF) ─────────────────────
 
 def detect_anomalies(spark: SparkSession, limit: int = 50) -> list:
-    """
-    Flag records where RPM or MAF deviates more than 3 standard deviations
-    from the mean (z-score > 3).
-    """
+   
     df = _read(spark).filter(
         F.col(COL_RPM).isNotNull() & F.col(COL_MAF).isNotNull()
     )
