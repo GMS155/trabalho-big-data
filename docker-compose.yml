@@ -25,11 +25,11 @@ services:
     environment:
       - HADOOP_HOME=/opt/hadoop
     healthcheck:
-      test: ["CMD-SHELL", "hdfs dfsadmin -safemode get 2>/dev/null | grep -q 'OFF' || exit 1"]
-      interval: 15s
+      test: ["CMD-SHELL", "curl -sf http://localhost:9870/ > /dev/null || exit 1"]
+      interval: 10s
       timeout: 10s
-      retries: 15
-      start_period: 60s
+      retries: 20
+      start_period: 30s
 
   # ── Hadoop DataNode ─────────────────────────────────────────────────────────
   datanode:

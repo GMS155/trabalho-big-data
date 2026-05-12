@@ -10,6 +10,12 @@ until hdfs dfs -ls / > /dev/null 2>&1; do
   sleep 5
 done
 
+echo "[init-hdfs] Waiting for NameNode to leave safe mode..."
+until hdfs dfsadmin -safemode get 2>/dev/null | grep -q "OFF"; do
+  echo "[init-hdfs] Still in safe mode, retrying in 5 s..."
+  sleep 5
+done
+
 echo "[init-hdfs] NameNode is ready. Creating directory structure..."
 
 hdfs dfs -mkdir -p /vehicle/raw
