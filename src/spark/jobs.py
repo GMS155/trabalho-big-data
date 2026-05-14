@@ -49,7 +49,7 @@ def _read(spark: SparkSession):
     """Return a DataFrame from processed Parquet, falling back to raw CSV."""
     try:
         df = spark.read.parquet(HDFS_PROCESSED)
-        if df.rdd.isEmpty():
+        if not df.take(1):
             raise ValueError("processed dir is empty")
         return df
     except Exception:
@@ -64,9 +64,7 @@ def _read(spark: SparkSession):
         )
     except Exception as exc:
         raise RuntimeError(
-            f"No data available. Processed path '{HDFS_PROCESSED}' and raw CSV "
-            f"'{HDFS_RAW}' are both inaccessible. "
-            "Ensure hdfs-init has completed successfully."
+            f"No data available"
         ) from exc
 
 
@@ -128,7 +126,6 @@ def speed_stats(spark: SparkSession) -> dict:
 # ── 1. Excesso de velocidade (> threshold km/h) ───────────────────────────────
 
 def speeding_events(spark: SparkSession, threshold: float = 80.0) -> list:
-    """Records where speed exceeds threshold, aggregated by vehicle/trip/day."""
     df = _read(spark)
     return (
         df.filter(F.col(COL_SPEED) > threshold)
@@ -142,7 +139,6 @@ def speeding_events(spark: SparkSession, threshold: float = 80.0) -> list:
         .toPandas()
         .pipe(_to_records)
     )
-
 
 # ── 2. Rotas mais utilizadas (lat/lon grid) ───────────────────────────────────
 
