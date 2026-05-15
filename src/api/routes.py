@@ -3,17 +3,14 @@ Endpoints
 ─────────
 GET /health                     → liveness probe
 GET /data                       → paginated raw records
-GET /vehicles                   → list of vehicle IDs
-GET /vehicles/{veh_id}/trips    → trips for a vehicle
-GET /trips/{trip_id}            → telemetry records for a trip
-GET /stats/speed                → global speed statistics
 
-GET /analytics/speeding         → excesso de velocidade (> threshold km/h)
-GET /analytics/routes           → rotas mais utilizadas (lat/lon grid)
-GET /analytics/stops            → paradas longas (velocidade = 0)
-GET /analytics/fuel             → consumo estimado via MAF
-GET /analytics/rpm-ranking      → ranking de eficiência por RPM médio
-GET /anomalies                  → detecção de anomalias (z-score RPM/MAF)
+GET /vehicles/{veh_id}/summary → per-vehicle summary (trips, speed, rpm, fuel, anomalies)
+GET /vehicles/{veh_id}/last-position → latest GPS position, speed and timestamp
+GET /trips/{trip_id}            → trip summary (veh, timestamps, distance, avg speed)
+GET /trips/{trip_id}/timeline  → time-series (timestamp, speed, rpm, maf)
+GET /stats/summary              → summary (vehicles, trips, avg speed, fuel, top speeding vehicle)
+GET /speeding                     → speeding events with filters (veh_id, day range, speed threshold)
+GET /analytics/high-rpm             → aggressive driving events (sustained high RPM while moving)
 """
 
 from fastapi import APIRouter, Depends, Query, Request, HTTPException
@@ -57,135 +54,93 @@ def get_data(
 
 # ── Vehicles ──────────────────────────────────────────────────────────────────
 
-@router.get("/vehicles", tags=["vehicles"])
-def list_vehicles(spark=Depends(_require_spark)):
-    """Return the list of distinct vehicle IDs present in the dataset."""
-    return {"vehicle_ids": jobs.list_vehicles(spark)}
 
-
-@router.get("/vehicles/{veh_id}/trips", tags=["vehicles"])
-def get_vehicle_trips(veh_id: int, spark=Depends(_require_spark)):
-    """Return distinct trip IDs and day numbers for a given vehicle."""
-    trips = jobs.get_vehicle_trips(spark, veh_id)
-    if not trips:
+@router.get("/vehicles/{veh_id}/summary", tags=["vehicles"])
+def get_vehicle_summary(veh_id: int, spark=Depends(_require_spark)):
+    """Per-vehicle summary: total trips, avg speed, avg RPM, estimated fuel and anomaly count."""
+    result = jobs.get_vehicle_summary(spark, veh_id)
+    if result is None:
         raise HTTPException(status_code=404, detail=f"Vehicle {veh_id} not found.")
-    return {"veh_id": veh_id, "trips": trips}
+    return result
+
+
+@router.get("/vehicles/{veh_id}/last-position", tags=["vehicles"])
+def get_vehicle_last_position(veh_id: int, spark=Depends(_require_spark)):
+    """Return the latest GPS position, speed and timestamp for a vehicle."""
+    result = jobs.get_vehicle_last_position(spark, veh_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Vehicle {veh_id} not found or has no GPS data.")
+    return {"veh_id": veh_id, **result}
 
 
 @router.get("/trips/{trip_id}", tags=["vehicles"])
-def get_trip(
+def get_trip(trip_id: float, spark=Depends(_require_spark)):
+    """Trip summary: vehicle, start/end timestamps, GPS distance and avg speed."""
+    result = jobs.get_trip_summary(spark, trip_id=trip_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Trip {trip_id} not found.")
+    return result
+
+
+@router.get("/trips/{trip_id}/timeline", tags=["vehicles"])
+def get_trip_timeline(
     trip_id: float,
     spark=Depends(_require_spark),
-    limit: int = Query(default=200, ge=1, le=1000),
+    limit: int = Query(default=500, ge=1, le=5000),
 ):
-    """Return telemetry records for a specific trip, ordered by timestamp."""
-    records = jobs.get_trip_records(spark, trip_id=trip_id, limit=limit)
-    if not records:
+    """Time-series of speed, RPM and MAF for a trip, ordered by timestamp."""
+    result = jobs.get_trip_timeline(spark, trip_id=trip_id, limit=limit)
+    if not result["count"]:
         raise HTTPException(status_code=404, detail=f"Trip {trip_id} not found.")
-    return {"trip_id": trip_id, "count": len(records), "records": records}
+    return {"trip_id": trip_id, **result}
 
 
-# ── Speed stats ───────────────────────────────────────────────────────────────
+# ── Dashboard summary ─────────────────────────────────────────────────────────
 
-@router.get("/stats/speed", tags=["stats"])
-def speed_stats(spark=Depends(_require_spark)):
-    """Global vehicle speed statistics (avg, min, max)."""
-    return jobs.speed_stats(spark)
+@router.get("/stats/summary", tags=["stats"])
+def get_summary(
+    spark=Depends(_require_spark),
+    speeding_threshold: float = Query(default=80.0, ge=0, description="Speed limit in km/h for speeding detection"),
+):
+    """
+    Summary combining vehicles, trips, avg speed, estimated fuel consumption,
+    and the top speeding vehicle.
+    """
+    return jobs.get_summary(spark, speeding_threshold=speeding_threshold)
 
 
 # ── 1. Excesso de velocidade ──────────────────────────────────────────────────
 
-@router.get("/analytics/speeding", tags=["analytics"])
-def speeding_events(
+@router.get("/speeding", tags=["analytics"])
+def speeding(
     spark=Depends(_require_spark),
     threshold: float = Query(default=80.0, ge=0, description="Speed limit in km/h"),
+    veh_id: int | None = Query(default=None, description="Filter by vehicle ID"),
+    day_min: int | None = Query(default=None, description="First day (DayNum) of the period"),
+    day_max: int | None = Query(default=None, description="Last day (DayNum) of the period"),
+    limit: int = Query(default=200, ge=1, le=1000),
 ):
-    """
-    Returns vehicles/trips where speed exceeded the threshold,
-    sorted by number of speeding records (descending).
-    """
-    results = jobs.speeding_events(spark, threshold=threshold)
-    return {
-        "threshold_kmh": threshold,
-        "count": len(results),
-        "results": results,
-    }
+    """Speeding events filtered by vehicle, day range and speed threshold."""
+    return jobs.speeding_events(
+        spark,
+        threshold=threshold,
+        veh_id=veh_id,
+        day_min=day_min,
+        day_max=day_max,
+        limit=limit,
+    )
 
 
-# ── 2. Rotas mais utilizadas ──────────────────────────────────────────────────
+# ── 2. Alta rotação ───────────────────────────────────────────────────────────
 
-@router.get("/analytics/routes", tags=["analytics"])
-def top_routes(
+@router.get("/analytics/high-rpm", tags=["analytics"])
+def high_rpm(
     spark=Depends(_require_spark),
-    precision: int = Query(default=2, ge=1, le=4, description="Decimal places for lat/lon grid"),
-    limit:     int = Query(default=20, ge=1, le=100),
+    rpm_threshold: float = Query(default=3500.0, ge=0, description="RPM threshold for aggressive driving"),
+    veh_id: int | None = Query(default=None, description="Filter by vehicle ID"),
+    limit: int = Query(default=200, ge=1, le=1000),
 ):
-    """
-    Groups GPS coordinates into a lat/lon grid and ranks zones by record count.
-    Higher precision = smaller grid cells (more granular routes).
-    """
-    results = jobs.top_routes(spark, precision=precision, limit=limit)
-    return {"precision": precision, "count": len(results), "zones": results}
+    """Detects aggressive driving: trips/vehicles with sustained high RPM while moving."""
+    return jobs.high_rpm_driving(spark, rpm_threshold=rpm_threshold, veh_id=veh_id, limit=limit)
 
 
-# ── 3. Paradas longas ─────────────────────────────────────────────────────────
-
-@router.get("/analytics/stops", tags=["analytics"])
-def long_stops(
-    spark=Depends(_require_spark),
-    min_consecutive: int = Query(
-        default=10, ge=1,
-        description="Minimum consecutive zero-speed samples to qualify as a long stop",
-    ),
-):
-    """
-    Detects sequences of consecutive zero-speed records within each trip.
-    Returns stop events sorted by number of stopped samples (longest first).
-    """
-    results = jobs.long_stops(spark, min_consecutive=min_consecutive)
-    return {
-        "min_consecutive_samples": min_consecutive,
-        "count": len(results),
-        "stops": results,
-    }
-
-
-# ── 4. Consumo estimado de combustível ───────────────────────────────────────
-
-@router.get("/analytics/fuel", tags=["analytics"])
-def fuel_consumption(spark=Depends(_require_spark)):
-    """
-    Estimates fuel consumption per vehicle/trip using the MAF sensor.
-
-    Formula (gasoline, ~1 s OBD sampling):
-      fuel_liters ≈ Σ(MAF g/s) / AFR(14.7) / density(740 g/L)
-    """
-    results = jobs.fuel_consumption(spark)
-    return {"count": len(results), "results": results}
-
-
-# ── 5. Ranking de eficiência por RPM ─────────────────────────────────────────
-
-@router.get("/analytics/rpm-ranking", tags=["analytics"])
-def rpm_efficiency_ranking(spark=Depends(_require_spark)):
-    """
-    Ranks vehicles by average RPM while moving (ascending).
-    Lower avg RPM at similar speeds indicates more efficient driving style.
-    """
-    results = jobs.rpm_efficiency_ranking(spark)
-    return {"count": len(results), "ranking": results}
-
-
-# ── 6. Detecção de anomalias ─────────────────────────────────────────────────
-
-@router.get("/anomalies", tags=["analytics"])
-def anomalies(
-    spark=Depends(_require_spark),
-    limit: int = Query(default=50, ge=1, le=200),
-):
-    """
-    Detects records where RPM or MAF deviates more than 3 standard deviations
-    from the mean (z-score > 3). Results include rpm_z and maf_z scores.
-    """
-    records = jobs.detect_anomalies(spark, limit=limit)
-    return {"count": len(records), "records": records}

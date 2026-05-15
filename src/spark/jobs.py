@@ -68,222 +68,259 @@ def _read(spark: SparkSession):
         ) from exc
 
 
-# ── Generic ───────────────────────────────────────────────────────────────────
-
-def get_records(spark: SparkSession, limit: int = 50, offset: int = 0) -> list:
-    df = _read(spark)
-    return _to_records(
-        df.limit(offset + limit)
-        .toPandas()
-        .iloc[offset:offset + limit]
-    )
-
-
 # ── Vehicles & trips ──────────────────────────────────────────────────────────
 
-def list_vehicles(spark: SparkSession) -> list:
-    df = _read(spark)
-    return df.select(COL_VEH).distinct().orderBy(COL_VEH).toPandas()[COL_VEH].astype(int).tolist()
-
-
-def get_vehicle_trips(spark: SparkSession, veh_id: int) -> list:
-    df = _read(spark)
-    return _to_records(
-        df.filter(F.col(COL_VEH) == veh_id)
-        .select(COL_TRIP, COL_DAY)
-        .distinct()
-        .orderBy(COL_DAY, COL_TRIP)
-        .toPandas()
-    )
-
-
-def get_trip_records(spark: SparkSession, trip_id: float, limit: int = 200) -> list:
-    df = _read(spark)
-    return _to_records(
-        df.filter(F.col(COL_TRIP) == trip_id)
-        .orderBy(COL_TS)
-        .limit(limit)
-        .toPandas()
-    )
-
-
-# ── Speed stats ───────────────────────────────────────────────────────────────
-
-def speed_stats(spark: SparkSession) -> dict:
-    df = _read(spark)
-    agg = (
-        df.filter(F.col(COL_SPEED).isNotNull())
-        .agg(
-            F.round(F.avg(COL_SPEED), 2).alias("avg_kmh"),
-            F.round(F.max(COL_SPEED), 2).alias("max_kmh"),
-            F.round(F.min(COL_SPEED), 2).alias("min_kmh"),
+def get_vehicle_last_position(spark: SparkSession, veh_id: int) -> dict | None:
+    row = (
+        _read(spark)
+        .filter(
+            (F.col(COL_VEH) == veh_id)
+            & F.col(COL_LAT).isNotNull()
+            & F.col(COL_LON).isNotNull()
         )
+        .orderBy(F.desc(COL_TS))
+        .select(COL_TS, COL_LAT, COL_LON, COL_SPEED)
+        .limit(1)
         .first()
     )
-    return agg.asDict()
+    if not row:
+        return None
+    return {
+        "lat": row[COL_LAT],
+        "lon": row[COL_LON],
+        "speed": row[COL_SPEED],
+        "timestamp": row[COL_TS],
+    }
 
 
-# ── 1. Excesso de velocidade (> threshold km/h) ───────────────────────────────
-
-def speeding_events(spark: SparkSession, threshold: float = 80.0) -> list:
-    df = _read(spark)
-    return (
-        df.filter(F.col(COL_SPEED) > threshold)
-        .groupBy(COL_VEH, COL_TRIP, COL_DAY)
-        .agg(
-            F.count("*").alias("speeding_records"),
-            F.round(F.max(COL_SPEED), 2).alias("max_speed_kmh"),
-            F.round(F.avg(COL_SPEED), 2).alias("avg_speed_kmh"),
-        )
-        .orderBy(F.desc("speeding_records"))
-        .toPandas()
-        .pipe(_to_records)
-    )
-
-# ── 2. Rotas mais utilizadas (lat/lon grid) ───────────────────────────────────
-
-def top_routes(spark: SparkSession, precision: int = 2, limit: int = 20) -> list:
-    """
-    Round lat/lon to `precision` decimal places and count records per cell.
-    The most-visited grid cells represent the most-used road segments.
-    """
-    df = _read(spark)
-    return (
-        df.filter(F.col(COL_LAT).isNotNull() & F.col(COL_LON).isNotNull())
-        .withColumn("lat_zone", F.round(F.col(COL_LAT), precision))
-        .withColumn("lon_zone", F.round(F.col(COL_LON), precision))
-        .groupBy("lat_zone", "lon_zone")
-        .agg(
-            F.count("*").alias("record_count"),
-            F.countDistinct(COL_VEH).alias("distinct_vehicles"),
-            F.countDistinct(COL_TRIP).alias("distinct_trips"),
-        )
-        .orderBy(F.desc("record_count"))
-        .limit(limit)
-        .toPandas()
-        .pipe(_to_records)
-    )
-
-
-# ── 3. Paradas longas (velocidade = 0 por muitos timestamps) ─────────────────
-
-def long_stops(spark: SparkSession, min_consecutive: int = 10) -> list:
-    """
-    Detect sequences of consecutive zero-speed samples within each trip.
-    Only returns stop events with >= min_consecutive samples.
-    """
-    df = _read(spark)
-    w = Window.partitionBy(COL_VEH, COL_TRIP).orderBy(COL_TS)
-
-    # cumsum of "moving" flag creates a unique group id for each stop segment
-    df = (
-        df
-        .withColumn("moving", (F.col(COL_SPEED) > 0).cast("int"))
-        .withColumn("stop_group", F.sum("moving").over(w))
-    )
-
-    stops = (
-        df.filter(F.col(COL_SPEED) == 0)
-        .groupBy(COL_VEH, COL_TRIP, COL_DAY, "stop_group")
-        .agg(
-            F.count("*").alias("stopped_samples"),
-            F.round(F.min(COL_TS) / 1000, 1).alias("start_timestamp_s"),
-            F.round(F.max(COL_TS) / 1000, 1).alias("end_timestamp_s"),
-            F.first(COL_LAT).alias("latitude"),
-            F.first(COL_LON).alias("longitude"),
-        )
-        .filter(F.col("stopped_samples") >= min_consecutive)
-        .withColumn("duration_s", F.col("end_timestamp_s") - F.col("start_timestamp_s"))
-        .drop("stop_group")
-        .orderBy(F.desc("stopped_samples"))
-    )
-    return stops.toPandas().pipe(_to_records)
-
-
-# ── 4. Consumo estimado de combustível (via MAF) ──────────────────────────────
-
-def fuel_consumption(spark: SparkSession) -> list:
-    """
-    Estimate fuel consumption per vehicle/trip using MAF sensor data.
-
-    Formula (assuming ~1 s OBD sampling interval):
-      fuel_mass_g  = sum(MAF_g/s) * SAMPLE_INTERVAL_S
-      fuel_liters  = fuel_mass_g / AIR_FUEL_RATIO / FUEL_DENSITY_G_L
-    """
-    df = _read(spark)
+def get_vehicle_summary(spark: SparkSession, veh_id: int) -> dict | None:
+    df = _read(spark).filter(F.col(COL_VEH) == veh_id)
     factor = SAMPLE_INTERVAL_S / AIR_FUEL_RATIO / FUEL_DENSITY_G_L
-    return (
-        df.filter(F.col(COL_MAF).isNotNull() & (F.col(COL_MAF) >= 0))
-        .groupBy(COL_VEH, COL_TRIP, COL_DAY)
-        .agg(
-            F.round(F.sum(COL_MAF) * factor, 4).alias("fuel_liters_est"),
-            F.round(F.avg(COL_MAF), 4).alias("avg_maf_g_per_s"),
-            F.round(F.max(COL_MAF), 4).alias("max_maf_g_per_s"),
-            F.count("*").alias("sample_count"),
-        )
-        .orderBy(F.desc("fuel_liters_est"))
-        .toPandas()
-        .pipe(_to_records)
-    )
 
-
-# ── 5. Ranking de eficiência por RPM médio ────────────────────────────────────
-
-def rpm_efficiency_ranking(spark: SparkSession) -> list:
-    """
-    Rank vehicles by average RPM while moving (ascending).
-    Lower avg RPM at comparable speeds indicates more efficient driving.
-    """
-    df = _read(spark)
-    ranked = (
-        df.filter(
-            F.col(COL_RPM).isNotNull()
-            & F.col(COL_MAF).isNotNull()
-            & (F.col(COL_SPEED) > 0)
-        )
-        .groupBy(COL_VEH)
-        .agg(
-            F.round(F.avg(COL_RPM), 1).alias("avg_rpm"),
-            F.round(F.avg(COL_MAF), 4).alias("avg_maf_g_per_s"),
-            F.round(F.avg(COL_LOAD), 2).alias("avg_load_pct"),
-            F.round(F.avg(COL_SPEED), 2).alias("avg_speed_kmh"),
-            F.count("*").alias("moving_samples"),
-        )
-        .orderBy("avg_rpm")
-        .toPandas()
-    )
-    ranked.insert(0, "rank", range(1, len(ranked) + 1))
-    return _to_records(ranked)
-
-
-# ── 6. Detecção de anomalias (z-score > 3 em RPM ou MAF) ─────────────────────
-
-def detect_anomalies(spark: SparkSession, limit: int = 50) -> list:
-   
-    df = _read(spark).filter(
-        F.col(COL_RPM).isNotNull() & F.col(COL_MAF).isNotNull()
-    )
-
-    stats = df.agg(
-        F.avg(COL_RPM).alias("rpm_mean"),
-        F.stddev(COL_RPM).alias("rpm_std"),
-        F.avg(COL_MAF).alias("maf_mean"),
-        F.stddev(COL_MAF).alias("maf_std"),
+    base = df.agg(
+        F.countDistinct(COL_TRIP).alias("total_trips"),
+        F.round(F.avg(F.when(F.col(COL_SPEED).isNotNull(), F.col(COL_SPEED))), 2).alias("avg_speed"),
+        F.round(F.avg(F.when(F.col(COL_RPM).isNotNull(), F.col(COL_RPM))), 1).alias("avg_rpm"),
+        F.round(
+            F.sum(F.when(F.col(COL_MAF).isNotNull() & (F.col(COL_MAF) >= 0), F.col(COL_MAF))) * factor,
+            4,
+        ).alias("estimated_fuel"),
+        # Anomaly counts per physical rule
+        F.count(F.when(
+            F.col(COL_RPM).isNotNull() & (F.col(COL_RPM) > 6000)
+            & F.col(COL_SPEED).isNotNull() & (F.col(COL_SPEED) == 0), True
+        )).alias("a_high_rpm_stopped"),
+        F.count(F.when(
+            F.col(COL_SPEED).isNotNull() & (F.col(COL_SPEED) > 0) & F.col(COL_RPM).isNull(), True
+        )).alias("a_speed_without_rpm"),
+        F.count(F.when(
+            F.col(COL_SPEED).isNotNull() & (F.col(COL_SPEED) > 0)
+            & F.col(COL_RPM).isNotNull() & (F.col(COL_RPM) == 0), True
+        )).alias("a_speed_with_zero_rpm"),
+        F.count(F.when(F.col(COL_MAF).isNull(), True)).alias("a_missing_maf"),
     ).first()
 
-    rpm_mean, rpm_std = stats["rpm_mean"], stats["rpm_std"]
-    maf_mean, maf_std = stats["maf_mean"], stats["maf_std"]
+    if not base or base["total_trips"] is None or int(base["total_trips"]) == 0:
+        return None
 
-    if not rpm_std or not maf_std:
-        return []
+    return {
+        "veh_id": veh_id,
+        "total_trips": int(base["total_trips"]),
+        "avg_speed": base["avg_speed"],
+        "avg_rpm": base["avg_rpm"],
+        "estimated_fuel": base["estimated_fuel"],
+        "anomalies": int(
+            base["a_high_rpm_stopped"]
+            + base["a_speed_without_rpm"]
+            + base["a_speed_with_zero_rpm"]
+            + base["a_missing_maf"]
+        ),
+    }
 
-    return (
-        df.withColumn("rpm_z", F.round(F.abs((F.col(COL_RPM) - rpm_mean) / rpm_std), 3))
-        .withColumn("maf_z", F.round(F.abs((F.col(COL_MAF) - maf_mean) / maf_std), 3))
-        .filter((F.col("rpm_z") > 3) | (F.col("maf_z") > 3))
-        .orderBy(F.desc(F.greatest("rpm_z", "maf_z")))
-        .limit(limit)
-        .toPandas()
-        .pipe(_to_records)
+
+def get_summary(
+    spark: SparkSession,
+    speeding_threshold: float = 80.0
+) -> dict:
+    df = _read(spark)
+
+    # Single pass for base aggregations + stats needed for anomaly detection
+    base = df.agg(
+        F.countDistinct(COL_VEH).alias("total_vehicles"),
+        F.countDistinct(COL_TRIP).alias("total_trips"),
+        F.round(F.avg(F.when(F.col(COL_SPEED).isNotNull(), F.col(COL_SPEED))), 2).alias("avg_speed"),
+        F.round(
+            F.sum(F.when(F.col(COL_MAF).isNotNull() & (F.col(COL_MAF) >= 0), F.col(COL_MAF)))
+            * (SAMPLE_INTERVAL_S / AIR_FUEL_RATIO / FUEL_DENSITY_G_L),
+            4,
+        ).alias("total_fuel_estimated")
+    ).first()
+
+    # Top speeding vehicle
+    top_row = (
+        df.filter(F.col(COL_SPEED) > speeding_threshold)
+        .groupBy(COL_VEH)
+        .agg(F.count("*").alias("events"))
+        .orderBy(F.desc("events"))
+        .limit(1)
+        .first()
+    )
+    top_speeding = (
+        {"veh_id": int(top_row[COL_VEH]), "events": int(top_row["events"])}
+        if top_row else None
     )
 
+    return {
+        "total_vehicles": int(base["total_vehicles"]),
+        "total_trips": int(base["total_trips"]),
+        "avg_speed": base["avg_speed"],
+        "total_fuel_estimated": base["total_fuel_estimated"],
+        "top_speeding_vehicle": top_speeding,
+    }
+
+
+def get_trip_timeline(spark: SparkSession, trip_id: float, limit: int = 500) -> dict:
+    timestamps, speeds, rpms, mafs = [], [], [], []
+    for row in (
+        _read(spark)
+        .filter(F.col(COL_TRIP) == trip_id)
+        .select(COL_TS, COL_SPEED, COL_RPM, COL_MAF)
+        .orderBy(COL_TS)
+        .limit(limit)
+        .toLocalIterator()
+    ):
+        timestamps.append(row[COL_TS])
+        speeds.append(row[COL_SPEED])
+        rpms.append(row[COL_RPM])
+        mafs.append(row[COL_MAF])
+    return {
+        "count": len(timestamps),
+        "timestamps": timestamps,
+        "speed_kmh": speeds,
+        "rpm": rpms,
+        "maf_g_per_s": mafs,
+    }
+
+
+def get_trip_summary(spark: SparkSession, trip_id: float) -> dict | None:
+    df = _read(spark).filter(F.col(COL_TRIP) == trip_id)
+
+    w = Window.partitionBy(COL_TRIP).orderBy(COL_TS)
+    R = 6371.0  # Earth radius in km
+
+    enriched = (
+        df
+        .withColumn("prev_lat", F.lag(COL_LAT).over(w))
+        .withColumn("prev_lon", F.lag(COL_LON).over(w))
+        .withColumn("segment_km", F.when(
+            F.col("prev_lat").isNotNull() & F.col("prev_lon").isNotNull()
+            & F.col(COL_LAT).isNotNull() & F.col(COL_LON).isNotNull(),
+            F.lit(2.0 * R) * F.asin(F.sqrt(F.least(
+                F.lit(1.0),
+                F.pow(F.sin(F.radians(F.col(COL_LAT) - F.col("prev_lat")) / 2), 2)
+                + F.cos(F.radians(F.col("prev_lat")))
+                * F.cos(F.radians(F.col(COL_LAT)))
+                * F.pow(F.sin(F.radians(F.col(COL_LON) - F.col("prev_lon")) / 2), 2),
+            )))
+        ))
+    )
+
+    row = enriched.agg(
+        F.count("*").alias("record_count"),
+        F.first(COL_VEH).alias("veh_id"),
+        F.min(COL_TS).alias("start_time"),
+        F.max(COL_TS).alias("end_time"),
+        F.round(F.avg(F.when(F.col(COL_SPEED).isNotNull(), F.col(COL_SPEED))), 2).alias("avg_speed"),
+        F.round(F.sum("segment_km"), 3).alias("distance_km"),
+    ).first()
+
+    if not row or not row["record_count"]:
+        return None
+
+    return {
+        "trip_id": trip_id,
+        "veh_id": int(row["veh_id"]),
+        "start_time": row["start_time"],
+        "end_time": row["end_time"],
+        "distance_km": row["distance_km"],
+        "avg_speed": row["avg_speed"],
+    }
+
+
+# ── 1. Excesso de velocidade (> threshold km/h) ─────────────────────────────
+
+def speeding_events(
+    spark: SparkSession,
+    threshold: float = 80.0,
+    veh_id: int | None = None,
+    day_min: int | None = None,
+    day_max: int | None = None,
+    limit: int = 200,
+) -> dict:
+    df = _read(spark)
+    df = df.filter(F.col(COL_SPEED) > threshold)
+    if veh_id is not None:
+        df = df.filter(F.col(COL_VEH) == veh_id)
+    if day_min is not None:
+        df = df.filter(F.col(COL_DAY) >= day_min)
+    if day_max is not None:
+        df = df.filter(F.col(COL_DAY) <= day_max)
+    events = [
+        row.asDict()
+        for row in (
+            df.groupBy(COL_VEH, COL_TRIP, COL_DAY)
+            .agg(
+                F.count("*").alias("speeding_records"),
+                F.round(F.max(COL_SPEED), 2).alias("max_speed_kmh"),
+                F.round(F.avg(COL_SPEED), 2).alias("avg_speed_kmh"),
+            )
+            .orderBy(F.desc("speeding_records"))
+            .limit(limit)
+            .toLocalIterator()
+        )
+    ]
+    return {
+        "threshold_kmh": threshold,
+        "filters": {"veh_id": veh_id, "day_min": day_min, "day_max": day_max},
+        "count": len(events),
+        "events": events,
+    }
+
+
+# ── 2. Alta rotação (condução agressiva) ─────────────────────────────────────
+
+def high_rpm_driving(
+    spark: SparkSession,
+    rpm_threshold: float = 3500.0,
+    veh_id: int | None = None,
+    limit: int = 200,
+) -> dict:
+    df = _read(spark).filter(
+        F.col(COL_RPM).isNotNull()
+        & (F.col(COL_RPM) > rpm_threshold)
+        & F.col(COL_SPEED).isNotNull()
+        & (F.col(COL_SPEED) > 0)
+    )
+    if veh_id is not None:
+        df = df.filter(F.col(COL_VEH) == veh_id)
+    events = [
+        row.asDict()
+        for row in (
+            df.groupBy(COL_VEH, COL_TRIP)
+            .agg(
+                F.count("*").alias("high_rpm_samples"),
+                F.round(F.max(COL_RPM), 1).alias("max_rpm"),
+                F.round(F.avg(COL_RPM), 1).alias("avg_rpm"),
+                F.round(F.avg(COL_SPEED), 2).alias("avg_speed_kmh"),
+            )
+            .orderBy(F.desc("high_rpm_samples"))
+            .limit(limit)
+            .toLocalIterator()
+        )
+    ]
+    return {
+        "rpm_threshold": rpm_threshold,
+        "filters": {"veh_id": veh_id},
+        "count": len(events),
+        "events": events,
+    }
