@@ -1,15 +1,3 @@
-"""
-FastAPI application entry-point.
-
-On startup:
-  1. Creates a SparkSession connected to spark://spark-master:7077
-  2. Launches the Structured Streaming job in a background daemon thread
-     (watches hdfs://namenode:9000/incoming/ for new vehicle CSV files)
-
-Route handlers in api/routes.py use the shared SparkSession stored in
-app.state.spark to run batch queries against HDFS /processed/.
-"""
-
 import logging
 import threading
 from contextlib import asynccontextmanager

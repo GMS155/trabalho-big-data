@@ -1,13 +1,3 @@
-"""
-Spark Structured Streaming job.
-
-Monitors hdfs://namenode:9000/incoming/ for new CSV files that share the
-vehicle_data schema.  Each trigger reads at most one new file, cleans and
-renames columns, and appends the result as Parquet to /processed/.
-
-Run in a daemon thread so it co-exists with the FastAPI server.
-"""
-
 import logging
 
 from pyspark.sql import SparkSession, DataFrame
@@ -47,8 +37,6 @@ def _write_batch(batch_df: DataFrame, batch_id: int) -> None:
 
 
 def start_streaming(spark: SparkSession) -> None:
-    """Entry-point called from a background thread in app.py."""
-    logger.info("Structured Streaming: watching %s", HDFS_INCOMING)
 
     stream_df = (
         spark.readStream

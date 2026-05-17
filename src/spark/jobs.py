@@ -1,15 +1,3 @@
-"""
-Batch query functions executed by FastAPI route handlers.
-
-All functions read from the processed Parquet sink written by the streaming
-job.  When no processed data exists yet they fall back to the raw CSV stored
-in HDFS.
-
-Dataset columns:
-  DayNum, VehId, Trip, Timestamp(ms), Latitude[deg], Longitude[deg],
-  Vehicle Speed[km/h], MAF[g/sec], Engine RPM[RPM], Absolute Load[%]
-"""
-
 import math
 from pyspark.sql import SparkSession, Window
 from pyspark.sql import functions as F
@@ -33,16 +21,6 @@ COL_DAY   = "DayNum"
 AIR_FUEL_RATIO   = 14.7   # stoichiometric AFR
 FUEL_DENSITY_G_L = 740.0  # g/L
 SAMPLE_INTERVAL_S = 1.0   # assumed OBD sampling period in seconds
-
-
-def _to_records(pdf) -> list:
-    """Convert a pandas DataFrame to a list of dicts, replacing NaN/Inf with None."""
-    records = pdf.to_dict(orient="records")
-    return [
-        {k: (None if isinstance(v, float) and not math.isfinite(v) else v)
-         for k, v in row.items()}
-        for row in records
-    ]
 
 
 def _read(spark: SparkSession):

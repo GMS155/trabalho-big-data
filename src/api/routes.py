@@ -40,18 +40,6 @@ def health_check(request: Request):
     return JSONResponse(status_code=503, content={"status": "starting"})
 
 
-# ── Raw data (paginated) ──────────────────────────────────────────────────────
-
-@router.get("/data", tags=["data"])
-def get_data(
-    spark=Depends(_require_spark),
-    limit:  int = Query(default=50,  ge=1, le=500),
-    offset: int = Query(default=0,   ge=0),
-):
-    """Return paginated rows from the processed HDFS Parquet sink."""
-    return jobs.get_records(spark, limit=limit, offset=offset)
-
-
 # ── Vehicles ──────────────────────────────────────────────────────────────────
 
 

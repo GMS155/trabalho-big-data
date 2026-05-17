@@ -83,20 +83,6 @@ O arquivo será processado em até 30 segundos e gravado em Parquet em `/process
 
 A documentação interativa está em **http://localhost:8000/docs**.
 
-| Método | Endpoint | Descrição |
-|--------|----------|-----------|
-| `GET` | `/health` | Status da API e do SparkSession |
-| `GET` | `/data` | Registros paginados (`limit`, `offset`) |
-| `GET` | `/vehicles` | Lista de IDs de veículos |
-| `GET` | `/vehicles/{veh_id}/trips` | Viagens de um veículo |
-| `GET` | `/trips/{trip_id}` | Telemetria de uma viagem (`limit`) |
-| `GET` | `/stats/speed` | Estatísticas globais de velocidade (avg/min/max) |
-| `GET` | `/analytics/speeding` | Eventos de excesso de velocidade (`threshold`) |
-| `GET` | `/analytics/routes` | Rotas mais utilizadas via grid lat/lon |
-| `GET` | `/analytics/stops` | Paradas longas (velocidade = 0) |
-| `GET` | `/analytics/fuel` | Consumo estimado de combustível via MAF |
-| `GET` | `/analytics/rpm-ranking` | Ranking de eficiência por RPM médio |
-| `GET` | `/anomalies` | Anomalias detectadas via z-score em RPM/MAF |
 
 ## Interfaces web
 
@@ -125,11 +111,3 @@ This project requires the following Python packages:
 - PySpark
 
 These dependencies are listed in the `requirements.txt` file and will be installed automatically when building the Docker image.
-
-## Contributing
-
-Contributions are welcome! Please open an issue or submit a pull request for any enhancements or bug fixes.
-
-## License
-
-This project is licensed under the MIT License. See the LICENSE file for more details.
